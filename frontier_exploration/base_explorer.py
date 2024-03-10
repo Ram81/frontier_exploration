@@ -107,7 +107,7 @@ class BaseExplorer(Sensor):
     @property
     def agent_position(self):
         if self._agent_position is None:
-            self._agent_position = self._sim.get_agent_state().position
+            self._agent_position = self._sim.get_agent(0).get_state().position
         return self._agent_position
 
     @property
@@ -119,7 +119,7 @@ class BaseExplorer(Sensor):
             except AttributeError:
                 # hablab v0.2.4
                 self._agent_heading = TopDownMap.get_polar_angle(
-                    self._sim.get_agent_state()
+                    self._sim.get_agent(0).get_state()
                 )
         return self._agent_heading
 
