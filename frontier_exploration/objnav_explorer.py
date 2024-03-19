@@ -226,7 +226,7 @@ class GreedyObjNavExplorer(ObjNavExplorer):
 @dataclass
 class ObjNavExplorerSensorConfig(BaseExplorerSensorConfig):
     type: str = ObjNavExplorer.__name__
-    turn_angle: float = 30.0  # degrees
+    turn_angle: float = 10.0  # degrees
     beeline_dist_thresh: float = 8  # meters
     success_distance: float = 0.1  # meters
 

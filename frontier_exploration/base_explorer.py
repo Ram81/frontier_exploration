@@ -340,7 +340,7 @@ class BaseExplorerSensorConfig(LabSensorConfig):
     minimize_time: bool = True
     success_distance: float = 0.18  # meters
     turn_angle: float = 10.0  # degrees
-    visibility_dist: float = 4.5  # in meters
+    visibility_dist: float = 1.5  # in meters
 
 
 cs = ConfigStore.instance()
