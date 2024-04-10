@@ -30,6 +30,7 @@ class ActionIDs:
     MOVE_FORWARD = np.array([1])
     TURN_LEFT = np.array([2])
     TURN_RIGHT = np.array([3])
+    SUBTASK_STOP = np.array([6])
 
 
 @registry.register_sensor
@@ -134,7 +135,7 @@ class BaseExplorer(Sensor):
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
         self._pre_step(episode)
-        self._update_frontiers()
+        self._update_frontiers(task)
         self.closest_frontier_waypoint = self._get_closest_waypoint()
         action = self._decide_action(self.closest_frontier_waypoint)
 
@@ -151,7 +152,7 @@ class BaseExplorer(Sensor):
             self._curr_ep_id = episode.episode_id
             self._reset(episode)  # New episode, reset maps
 
-    def _update_fog_of_war_mask(self):
+    def _update_fog_of_war_mask(self, task):
         orig = self.fog_of_war_mask.copy()
         self.fog_of_war_mask = reveal_fog_of_war(
             self.top_down_map,
@@ -164,8 +165,8 @@ class BaseExplorer(Sensor):
         updated = not np.array_equal(orig, self.fog_of_war_mask)
         return updated
 
-    def _update_frontiers(self):
-        updated = self._update_fog_of_war_mask()
+    def _update_frontiers(self, task):
+        updated = self._update_fog_of_war_mask(task)
         if updated:
             self.frontier_waypoints = detect_frontier_waypoints(
                 self.top_down_map,
@@ -267,7 +268,9 @@ class BaseExplorer(Sensor):
     def _convert_meters_to_pixel(self, meters: float) -> int:
         return int(
             meters
-            / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
+            / maps.calculate_meters_per_pixel(
+                self._map_resolution, sim=self._sim
+            )
         )
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:

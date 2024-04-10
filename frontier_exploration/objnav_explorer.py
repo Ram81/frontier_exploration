@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from habitat import EmbodiedTask, registry
+from habitat import EmbodiedTask, logger, registry
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import DistanceToGoal
 from habitat.tasks.nav.object_nav_task import ObjectGoal, ObjectViewLocation
@@ -71,6 +71,20 @@ class ObjNavExplorer(BaseExplorer):
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
         super()._pre_step(episode)
+
+        # Handling edge case of GOAT task where we have to wait 1 step after subtask stop
+        if self._prev_action == ActionIDs.SUBTASK_STOP:
+            action = random.choice(
+                [
+                    ActionIDs.MOVE_FORWARD,
+                    ActionIDs.TURN_LEFT,
+                    ActionIDs.TURN_RIGHT,
+                ]
+            )
+            self._prev_action = action
+            self._step_count += 1
+            return action
+
         if self._state == State.EXPLORE:
             action = super().get_observation(task, episode, *args, **kwargs)
             if np.array_equal(action, ActionIDs.STOP):
@@ -87,21 +101,40 @@ class ObjNavExplorer(BaseExplorer):
                 )
         else:
             # Transition to another state if necessary
-            min_dist = self._get_min_dist()
+            min_dist, episode_ended = self._get_min_dist()
+
+            if episode_ended:
+                self._step_count += 1
+                return ActionIDs.STOP
+            # logger.info(
+            #     "Obj Nav explorer beeline {} -- {} - {}".format(
+            #         self._state, min_dist, self._success_distance
+            #     )
+            # )
+            if (
+                self._episode._shortest_path_cache is None
+                or len(self._episode.tasks) == task.active_subtask_idx
+            ):
+                logger.info(
+                    "Obj Nav explorer fog of war {} - {} - {}".format(
+                        min_dist,
+                        self._beeline_dist_thresh,
+                        self._goal_dist_measure.get_metric(),
+                    )
+                )
             if (
                 self._state == State.BEELINE
                 and min_dist < self._success_distance
             ):
                 # Change to PIVOT state if already within success distance
-                closest_point = self.identify_closest_viewpoint()
+                closest_point = self.identify_closest_viewpoint(task)
                 closest_rot = closest_point.agent_state.rotation
                 self._target_yaw = 2 * np.arctan2(
                     closest_rot[1], closest_rot[3]
                 )
                 self._state = State.PIVOT
             elif (
-                self._state == State.PIVOT
-                and min_dist > self._success_distance
+                self._state == State.PIVOT and min_dist > self._success_distance
             ):
                 # Change to BEELINE state if now out of the success distance
                 self._state = State.BEELINE
@@ -137,19 +170,51 @@ class ObjNavExplorer(BaseExplorer):
             return ActionIDs.TURN_RIGHT
         elif heading_err < -self._turn_angle / 2:
             return ActionIDs.TURN_LEFT
+
+        # Handle GOAT subtasks
+        if self._task.active_subtask_idx < len(self._episode.tasks):
+            # logger.info(
+            #     "Stop Active task idx {}".format(self._task.active_subtask_idx)
+            # )
+            return ActionIDs.SUBTASK_STOP
         return ActionIDs.STOP
 
-    def identify_closest_viewpoint(self):
+    def identify_closest_viewpoint(self, task: EmbodiedTask):
         """Returns the viewpoint closest to the agent"""
         if len(self._episode.goals) > 0:
-            goals = self._episode.goals
+            goals = self._episode.goals[task.active_subtask_idx]
+            # logger.info(
+            #     "Active GOAT subtask idx:".format(task.active_subtask_idx)
+            # )
         else:
             goals = self._task._dataset.goals_by_category[  # type: ignore
                 self._episode.goals_key
             ]
+        # logger.info(
+        #     "GOAT subtask viewpoints: {} - {}".format(
+        #         task.active_subtask_idx, type(goals[0])
+        #     )
+        # )
         if isinstance(goals[0], ObjectGoal):
             view_points = [vp for goal in goals for vp in goal.view_points]
+        elif isinstance(goals[0], dict):
+            # logger.info(
+            #     "GOAT subtask dict viewpoints: {}".format(
+            #         goals[0]["view_points"][0]
+            #     )
+            # )
+            view_points = []
+            for goal in goals:
+                for vp in goal["view_points"]:
+                    view_loc = ObjectViewLocation(**vp)  # type: ignore
+                    view_loc.agent_state = AgentState(**view_loc.agent_state)  # type: ignore
+                    view_points.append(view_loc)
         else:
+            # logger.info(
+            #     "GOAT subtask single viewpoint: {}".format(
+            #         task.active_subtask_idx
+            #     )
+            # )
             agent_state = AgentState(goals[0].position, goals[0].rotation, {})
             view_points = [ObjectViewLocation(agent_state, None)]
         min_dist, min_idx = float("inf"), None
@@ -164,22 +229,47 @@ class ObjNavExplorer(BaseExplorer):
     def _get_min_dist(self):
         """Returns the minimum distance to the closest target"""
         self._goal_dist_measure.update_metric(self._episode, task=self._task)
-        dist = self._goal_dist_measure.get_metric()
+        dist_measure = self._goal_dist_measure.get_metric()
+        # logger.info(
+        #     "Dist {} - {} ".format(dist, self._episode._shortest_path_cache)
+        # )
+        if isinstance(dist_measure, dict):
+            dist = dist_measure["distance_to_target"]
+        else:
+            dist = dist_measure
         if (
             self._episode._shortest_path_cache is None
             or len(self._episode._shortest_path_cache.points) == 0
         ):
-            return float("inf")
-        return dist
+            logger.info(
+                "No shortest path cache {}".format(
+                    self._goal_dist_measure.get_metric()
+                )
+            )
+            return float("inf"), dist_measure.get("episode_ended")
+        return dist, dist_measure.get("episode_ended")
 
-    def _update_fog_of_war_mask(self):
+    def _update_fog_of_war_mask(self, task):
         updated = (
-            super()._update_fog_of_war_mask()
+            super()._update_fog_of_war_mask(task)
             if self._state == State.EXPLORE
             else False
         )
 
-        min_dist = self._get_min_dist()
+        min_dist, episode_ended = self._get_min_dist()
+        if episode_ended:
+            return True
+        # if (
+        #     self._episode._shortest_path_cache is None
+        #     or len(self._episode.tasks) == task.active_subtask_idx
+        # ):
+        #     logger.info(
+        #         "Obj Nav explorer fog of war {} - {} - {}".format(
+        #             min_dist,
+        #             self._beeline_dist_thresh,
+        #             self._goal_dist_measure.get_metric(),
+        #         )
+        #     )
 
         if self._state == State.EXPLORE:
             # Start beelining if the minimum distance to the target is less than the
@@ -216,9 +306,7 @@ class GreedyObjNavExplorer(ObjNavExplorer):
             closest_point = self._episode_view_points[idx]
         # Identify the frontier waypoint closest to this object
         sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
-        idx, _ = self._astar_search(
-            sim_waypoints, start_position=closest_point
-        )
+        idx, _ = self._astar_search(sim_waypoints, start_position=closest_point)
 
         return self.frontier_waypoints[idx]
 
@@ -228,7 +316,7 @@ class ObjNavExplorerSensorConfig(BaseExplorerSensorConfig):
     type: str = ObjNavExplorer.__name__
     turn_angle: float = 30.0  # degrees
     beeline_dist_thresh: float = 8  # meters
-    success_distance: float = 0.1  # meters
+    success_distance: float = 0.25  # meters
 
 
 @dataclass

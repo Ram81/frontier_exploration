@@ -6,7 +6,10 @@ import cv2
 import numpy as np
 from habitat import EmbodiedTask, registry
 from habitat.config import read_write
-from habitat.config.default_structured_configs import TopDownMapMeasurementConfig
+from habitat.config.default_structured_configs import (
+    TopDownMapMeasurementConfig,
+)
+from habitat.core.simulator import AgentState
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import HeadingSensor, NavigationEpisode, TopDownMap
 from habitat.tasks.nav.object_nav_task import ObjectGoalNavEpisode
@@ -24,7 +27,10 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
 from frontier_exploration.base_explorer import BaseExplorer
-from frontier_exploration.objnav_explorer import GreedyObjNavExplorer, ObjNavExplorer
+from frontier_exploration.objnav_explorer import (
+    GreedyObjNavExplorer,
+    ObjNavExplorer,
+)
 from frontier_exploration.utils.general_utils import habitat_to_xyz
 
 DEBUG = os.environ.get("MAP_DEBUG", "False").lower() == "true"
@@ -51,7 +57,9 @@ class FrontierExplorationMap(TopDownMap):
                 self._explorer_uuid = i.cls_uuid
 
         if self._explorer_uuid is None:
-            raise RuntimeError("FrontierExplorationMap needs an exploration sensor!")
+            raise RuntimeError(
+                "FrontierExplorationMap needs an exploration sensor!"
+            )
         explorer_config = task._config.lab_sensors[self._explorer_uuid]
         with read_write(config):
             config.map_resolution = explorer_config.map_resolution
@@ -61,14 +69,18 @@ class FrontierExplorationMap(TopDownMap):
         self._explorer_sensor = None
         self._draw_waypoints: bool = config.draw_waypoints
         self._is_feasible: bool = True
-        self._static_metrics: Dict[str, Any] = {}  # only updated once per episode
+        self._static_metrics: Dict[
+            str, Any
+        ] = {}  # only updated once per episode
         self._task = task
 
     def reset_metric(
         self, episode: NavigationEpisode, *args: Any, **kwargs: Any
     ) -> None:
         assert "task" in kwargs, "task must be passed to reset_metric!"
-        self._explorer_sensor = kwargs["task"].sensor_suite.sensors[self._explorer_uuid]
+        self._explorer_sensor = kwargs["task"].sensor_suite.sensors[
+            self._explorer_uuid
+        ]
         self._static_metrics = {}
         super().reset_metric(episode, *args, **kwargs)
         self._draw_target_bbox_mask(episode)
@@ -82,7 +94,7 @@ class FrontierExplorationMap(TopDownMap):
         x, y, z = habitat_to_xyz(np.array(episode.start_position))
         self._static_metrics["upper_bound"] = (upper_bound[0], upper_bound[2])
         self._static_metrics["lower_bound"] = (lower_bound[0], lower_bound[2])
-        self._static_metrics["grid_resolution"] = self._metric["map"].shape[:2]
+        self._static_metrics["grid_resolution"] = self._top_down_map.shape[:2]
         self._static_metrics["tf_episodic_to_global"] = np.array(
             [
                 [np.cos(episodic_start_yaw), -np.sin(episodic_start_yaw), 0, x],
@@ -130,7 +142,9 @@ class FrontierExplorationMap(TopDownMap):
                 1,
             )
 
-        beeline_target = getattr(self._explorer_sensor, "beeline_target_pixels", None)
+        beeline_target = getattr(
+            self._explorer_sensor, "beeline_target_pixels", None
+        )
         if beeline_target is not None:
             cv2.circle(
                 new_map,
@@ -160,8 +174,71 @@ class FrontierExplorationMap(TopDownMap):
                 cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
             )
 
+    def _draw_goals_positions(self, episode):
+        if self._config.draw_goal_positions:
+            for idx, super_goals in enumerate(episode.goals):
+                if type(super_goals[0]) != dict:
+                    super_goals = super_goals[0]
+                for goal in super_goals:
+                    task_type = episode.tasks[idx][1]
+                    if self._is_on_same_floor(goal["position"][1]):
+                        try:
+                            if task_type == "object":
+                                point_indicator = (
+                                    maps.OBJECTNAV_TARGET_INDICATOR
+                                )
+                            elif task_type == "description":
+                                point_indicator = maps.LANGNAV_TARGET_INDICATOR
+                            elif task_type == "image":
+                                point_indicator = maps.IMGNAV_TARGET_INDICATOR
+
+                            if idx == 0:
+                                point_indicator = maps.FIRST_TARGET_INDICATOR
+
+                            self._draw_point(
+                                goal["position"],
+                                point_indicator,
+                            )
+                        except AttributeError:
+                            pass
+                break
+
     def _draw_goals_view_points(self, episode):
-        super()._draw_goals_view_points(episode)
+        if self._config.draw_view_points:
+            for idx, super_goals in enumerate(episode.goals):
+                if type(super_goals[0]) != dict:
+                    super_goals = super_goals[0]
+                for goal in super_goals:
+                    task_type = episode.tasks[idx][1]
+                    if self._is_on_same_floor(goal["position"][1]):
+                        try:
+                            if task_type == "object":
+                                view_point_indicator = (
+                                    maps.OBJECTNAV_VIEW_POINT_INDICATOR
+                                )
+                            elif task_type == "description":
+                                view_point_indicator = (
+                                    maps.LANGNAV_VIEW_POINT_INDICATOR
+                                )
+                            elif task_type == "image":
+                                view_point_indicator = (
+                                    maps.IMGNAV_VIEW_POINT_INDICATOR
+                                )
+
+                            if idx == 0:
+                                view_point_indicator = (
+                                    maps.FIRST_TARGET_INDICATOR
+                                )
+
+                            if goal["view_points"] is not None:
+                                for view_point in goal["view_points"]:
+                                    self._draw_point(
+                                        view_point["agent_state"]["position"],
+                                        view_point_indicator,
+                                    )
+                        except AttributeError:
+                            pass
+                break
 
         # Use this opportunity to determine whether this episode is feasible to complete
         # without climbing stairs
@@ -209,7 +286,9 @@ class FrontierExplorationMap(TopDownMap):
         mask = cv2.drawContours(mask, [best_cnt], 0, 1, -1)  # type: ignore
         masked_values = self._top_down_map[mask.astype(bool)]
         values = set(masked_values.tolist())
-        is_feasible = MAP_VALID_POINT in values and MAP_VIEW_POINT_INDICATOR in values
+        is_feasible = (
+            MAP_VALID_POINT in values and MAP_VIEW_POINT_INDICATOR in values
+        )
 
         self._is_feasible = is_feasible
 
@@ -262,6 +341,7 @@ class FrontierExplorationMap(TopDownMap):
 class FrontierExplorationMapMeasurementConfig(TopDownMapMeasurementConfig):
     type: str = FrontierExplorationMap.__name__
     draw_waypoints: bool = True
+    draw_shortest_path: bool = False
 
 
 cs = ConfigStore.instance()
